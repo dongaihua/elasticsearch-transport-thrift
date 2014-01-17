@@ -22,11 +22,10 @@ package org.elasticsearch.thrift;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
+import org.apache.thrift.server.TNonblockingServer;
 import org.apache.thrift.server.TServer;
 import org.apache.thrift.server.TThreadPoolServer;
-import org.apache.thrift.transport.TFramedTransport;
-import org.apache.thrift.transport.TServerSocket;
-import org.apache.thrift.transport.TTransportFactory;
+import org.apache.thrift.transport.*;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.inject.Inject;
@@ -56,6 +55,8 @@ public class ThriftServer extends AbstractLifecycleComponent<ThriftServer> {
 
     final String publishHost;
 
+    final String serverType;
+
     private final NetworkService networkService;
 
     private final NodeService nodeService;
@@ -78,6 +79,7 @@ public class ThriftServer extends AbstractLifecycleComponent<ThriftServer> {
         this.port = componentSettings.get("port", "9500-9600");
         this.bindHost = componentSettings.get("bind_host", settings.get("transport.bind_host", settings.get("transport.host")));
         this.publishHost = componentSettings.get("publish_host", settings.get("transport.publish_host", settings.get("transport.host")));
+        this.serverType = componentSettings.get("server_type", settings.get("thrift.server_type", "threadpool"));
 
         if (componentSettings.get("protocol", "binary").equals("compact")) {
             protocolFactory = new TCompactProtocol.Factory();
@@ -104,26 +106,43 @@ public class ThriftServer extends AbstractLifecycleComponent<ThriftServer> {
                 ThriftServer.this.portNumber = portNumber;
                 try {
                     Rest.Processor processor = new Rest.Processor(client);
-
-                    // Bind and start to accept incoming connections.
-                    TServerSocket serverSocket = new TServerSocket(new InetSocketAddress(bindAddr, portNumber));
-
-                    TThreadPoolServer.Args args = new TThreadPoolServer.Args(serverSocket)
-                            .minWorkerThreads(16)
-                            .maxWorkerThreads(Integer.MAX_VALUE)
-                            .inputProtocolFactory(protocolFactory)
-                            .outputProtocolFactory(protocolFactory)
-                            .processor(processor);
-
-                    if (frame <= 0) {
-                        args.inputTransportFactory(new TTransportFactory());
-                        args.outputTransportFactory(new TTransportFactory());
+                    if (serverType.equals("nonblocking")) {
+                        TNonblockingServerSocket socketTransport = new TNonblockingServerSocket(
+                                portNumber);
+                        TNonblockingServer.Args args = new TNonblockingServer.Args(
+                                socketTransport);
+                        args.processor(processor);
+                        args.protocolFactory(protocolFactory);
+                        if (frame <= 0) {
+                            args.inputTransportFactory(new TTransportFactory());
+                            args.outputTransportFactory(new TTransportFactory());
+                        } else {
+                            args.inputTransportFactory(new TFramedTransport.Factory(frame));
+                            args.outputTransportFactory(new TFramedTransport.Factory(frame));
+                        }
+                        // 使用非阻塞式IO，服务端和客户端需要指定TFramedTransport数据传输的方式
+                        server = new TNonblockingServer(args);
                     } else {
-                        args.inputTransportFactory(new TFramedTransport.Factory(frame));
-                        args.outputTransportFactory(new TFramedTransport.Factory(frame));
-                    }
+                        // Bind and start to accept incoming connections.
+                        TServerSocket serverSocket = new TServerSocket(new InetSocketAddress(bindAddr, portNumber));
 
-                    server = new TThreadPoolServer(args);
+                        TThreadPoolServer.Args args = new TThreadPoolServer.Args(serverSocket)
+                                .minWorkerThreads(16)
+                                .maxWorkerThreads(Integer.MAX_VALUE)
+                                .inputProtocolFactory(protocolFactory)
+                                .outputProtocolFactory(protocolFactory)
+                                .processor(processor);
+
+                        if (frame <= 0) {
+                            args.inputTransportFactory(new TTransportFactory());
+                            args.outputTransportFactory(new TTransportFactory());
+                        } else {
+                            args.inputTransportFactory(new TFramedTransport.Factory(frame));
+                            args.outputTransportFactory(new TFramedTransport.Factory(frame));
+                        }
+
+                        server = new TThreadPoolServer(args);
+                    }
                 } catch (Exception e) {
                     lastException.set(e);
                     return false;
